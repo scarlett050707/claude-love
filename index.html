@@ -4807,25 +4807,7 @@ function detectDiaryRequest(text) {
   return patterns.some(p => p.test(text));
 }
 
-// 覆盖sendMessage，拦截日记请求
-const _originalSendMessage = window.sendMessage;
-window.sendMessage = async function() {
-  const input = document.getElementById('input');
-  const text = input ? input.value.trim() : '';
-  
-  // 检测是否是写日记请求
-  if (text && detectDiaryRequest(text)) {
-    input.value = '';
-    toast('AI正在写日记...');
-    await aiWriteDiary(text);
-    return;
-  }
-  
-  // 否则执行原有逻辑
-  if (_originalSendMessage) {
-    return _originalSendMessage.call(this);
-  }
-};
+
 
 // ========== 初始化 ========== //
 
