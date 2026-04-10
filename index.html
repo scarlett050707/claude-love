@@ -2668,6 +2668,9 @@ async function sendMessageWithContent(chat){
   const activityPrompt=buildActivityPrompt();
   const diaryPrompt=typeof buildDiaryPrompt==='function'?buildDiaryPrompt():'';
   const systemPrompt=`${timeInfo}\n\n${msgTimelineInfo}${locationPrompt}${memoryPrompt}${activityPrompt}${diaryPrompt}`;
+  window.__lastActivityPrompt = activityPrompt;
+  window.__lastMergedActivityHistory = getMergedActivityHistory();
+  console.log('[发送给AI的手机活动提示词]', activityPrompt, window.__lastMergedActivityHistory);
   
   let apiMessages=[];
   if(systemPrompt.trim()) apiMessages.push({role:'system',content:systemPrompt});
@@ -3298,9 +3301,7 @@ function buildMemoryPrompt(){
 
 // 构建手机活动上下文提示词
 function buildActivityPrompt(){
-  if (!appUsageHistory || appUsageHistory.length === 0) return '';
-  const last24h = appUsageHistory
-    .map(r => normalizeActivityRecord(r, r?.source || 'history'))
+  const last24h = getMergedActivityHistory()
     .filter(Boolean)
     .filter(r => Date.now() - r.timestamp < 24 * 3600 * 1000)
     .slice(-20);
@@ -3963,6 +3964,53 @@ function normalizeActivityRecord(raw, fallbackSource) {
   };
 }
 
+function getMergedActivityHistory() {
+  const historyRecords = (appUsageHistory || [])
+    .map(item => normalizeActivityRecord(item, item?.source || 'history'))
+    .filter(Boolean);
+
+  const chat = chats.find(c => c.id === currentChatId);
+  const chatRecords = !chat ? [] : (chat.messages || [])
+    .filter(m => m && m.role === 'activity')
+    .map(m => normalizeActivityRecord({
+      appName: m.appName ?? m.content,
+      timestamp: m.timestamp,
+      source: m.source || 'chat'
+    }, 'chat'))
+    .filter(Boolean);
+
+  const merged = [...historyRecords, ...chatRecords]
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const deduped = [];
+  merged.forEach(record => {
+    const exists = deduped.find(item =>
+      item.appName === record.appName &&
+      Math.abs(item.timestamp - record.timestamp) < 30000
+    );
+    if (!exists) deduped.push(record);
+  });
+  return deduped;
+}
+
+function extractActivityEvents(payload) {
+  const candidates = [];
+
+  if (Array.isArray(payload)) {
+    candidates.push(...payload);
+  } else if (payload && typeof payload === 'object') {
+    if (Array.isArray(payload.events)) candidates.push(...payload.events);
+    if (Array.isArray(payload.data)) candidates.push(...payload.data);
+    if (payload.received) candidates.push(payload.received);
+    if (payload.event) candidates.push(payload.event);
+    if (payload.appName || payload.app || payload.name || payload.content) candidates.push(payload);
+  }
+
+  return candidates
+    .map(item => normalizeActivityRecord(item, 'server'))
+    .filter(Boolean);
+}
+
 // ---- 持久化 ----
 function loadShortcutConfig() {
   try {
@@ -4113,9 +4161,7 @@ async function triggerAIAwareness() {
   if (!pendingSummary) return;
 
   // 最近24小时的历史活动
-  const last24h = appUsageHistory
-    .map(r => normalizeActivityRecord(r, r?.source || 'history'))
-    .filter(Boolean)
+  const last24h = getMergedActivityHistory()
     .filter(r => Date.now() - r.timestamp < 24 * 3600 * 1000)
     .slice(-30);
   const historySummary = last24h.length > 0
@@ -4476,22 +4522,12 @@ window.pollServer = async function() {
         const data = await res.json();
         console.log(`[收到数据]`, data);
         
-        // 解析事件
-        let events = [];
-        if (Array.isArray(data)) {
-          events = data;
-        } else if (data.events) {
-          events = data.events;
-        } else if (data.data) {
-          events = data.data;
-        } else if (data.appName || data.app) {
-          events = [data];
-        }
+        const events = extractActivityEvents(data);
         
         if (events.length > 0) {
           events.forEach(e => {
-            const appName = e.appName || e.app || e.name;
-            const timestamp = e.timestamp || e.time || Date.now();
+            const appName = e.appName;
+            const timestamp = e.timestamp || Date.now();
             
             if (appName && appName !== '1' && appName !== 'undefined') {
               console.log(`[记录] ${appName}`);
@@ -4626,9 +4662,7 @@ async function aiWriteDiary(prompt) {
   
   // 获取今天的App使用记录
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const todayActivities = appUsageHistory
-    .map(r => normalizeActivityRecord(r, r?.source || 'history'))
-    .filter(Boolean)
+  const todayActivities = getMergedActivityHistory()
     .filter(r => r.timestamp >= todayStart)
     .map(r => {
       const time = new Date(r.timestamp).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
